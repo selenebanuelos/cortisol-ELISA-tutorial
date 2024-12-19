@@ -1,0 +1,254 @@
+---
+title: "Hair Cortisol ELISA Data Cleaning"
+author: "Selene Banuelos"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+## 0. Setup
+
+This is a quarto document, which allows you to mix text and R code within the same document. You can click "Render" in the toolbar above to see this document as an html document or pdf.
+
+To insert some R code, type "/r" and select "R code chunk" from the drop down menu.
+
+We will be using an R project to organize our files related to this hair cortisol project. Before we get started with the actual data cleaning, let's make sure we understand how R projects work and why we want to get familiar with using one.
+
+Here's a quick tutorial on how to create an R project: <https://www.youtube.com/watch?v=MdTtTN8PUqU&t=137s>
+
+Using R projects allow you to skip the hardcoding of a path when importing and saving files since R will know to look within the R project folder. This makes it easier for others to use your scripts if you decide to share them as well as saves you some typing.
+
+Let's look at some functions that allow you to use the advantages of an R project:
+
+```{r}
+## the function below prints out the current working directory (type ?getwd into console to get more info about how to use this function)
+
+getwd()
+```
+
+After running the function above, you'll see that we are in the "scripts" folder of our R project.
+
+The function dirname() allows you to look into the parent directory of any path specified. This function is useful for navigating to other folders within our R project.
+
+For example if we wanted to look into the main project folder, we can use dirname() along with getwd() to look from the "scripts" folder, up into the main folder of our project:
+
+```{r}
+dirname(getwd())
+```
+
+You can see we are now looking in the main project folder.
+
+These functions can be used to look into other folders within the project. For example, if we wanted to look at files in the "data" folder in the project from the current "scripts" folder, we can do as follows:
+
+```{r}
+paste0(dirname(getwd()), "/data/")
+
+## hint: type ?paste0 into the console to read about how to use/what the paste0() function does
+```
+
+We will use this technique to import your ELISA data.
+
+## 1. Import data
+
+```{r}
+## specify path where raw data is located, using the technique shown in step 0
+#data_path <- #your code here
+data_path <- paste0(dirname(getwd()), "/data/")
+
+## import data using data_path specified above
+raw_data <- read.csv(paste0(data_path, "data_file.csv"))
+
+```
+
+## 2. Calculate coefficient of variation for each sample
+
+Calculate each sample's coefficent of variation (CV) to check for excessive variation between replicate measurements. We will express variation as a percentage, AKA "the standard deviation is x% the size of the mean", using the following formula:
+
+$$
+\% CV = \frac{sd}{mean} * 100 
+$$
+
+\% CV \> 20 is considered excessive variation. Any samples with % CV \> 20 will be flagged with binary variable (AKA indicator variable) for downstream processing.
+
+Let's calculate the CV for each sample, using replicate OD values.
+
+```{r}
+## import tidyverse package, which has a lot of useful functions for data cleaning
+library(tidyverse)
+
+## the code below uses functions from the dplyr package
+## dplyr documentation: https://dplyr.tidyverse.org/
+## There is a dplyr cheat sheet included in the main folder of this rproject
+
+## create new dataset with sample % CV
+data_cv <- raw_data %>% # tell the functions below to modify "raw_data" object
+    group_by(Sample.ID) %>% # apply function below to each sample ID, separately
+    mutate(cv = sd(OD_ELISA) / mean(OD_ELISA) * 100) %>% # create new variable "cv"
+    ungroup(Sample.ID) # always ungroup after you are done
+
+## now let's check to see if there are any CVs > 20%
+view(filter(data_cv, cv > 20))
+```
+
+## 3. Make decision about possible outliers within technical replicates in samples with % CV \> 20
+
+The step above identified replicates with % CV \> 20. Now, let's use that information to make decisions about which replicates may be outliers that could be driving the excessive variation need to be discarded. There is no cut and dry solution for identifying outliers - selection of statistical methods for this purpose requires careful consideration of assumptions that underly a given test as well as sample size. If possible, it would be a good idea to manually look at any possible outliers and use your knowledge of the experimental process to decide if the outlier should be removed or not.
+
+```{r}
+## remove rows of replicates that you decide are outliers. Removing rows/selecting which rows to keep is known as subsetting
+## Resource: https://www.delftstack.com/howto/r/r-filter-multiple-conditions-dplyr-filter-multiple-conditions/
+data_remove <- data_cv %>%
+    filter(!(Sample.ID == 25 & Replicate == 3))
+```
+
+## 4. Refit all standard curves using the nplr package
+
+*nplr* is a package that automatically finds the best fitting 4PL or 5PL regression model for the standard curve on a plate.
+
+*Commo, F., Bot, B.M., n.d. R package nplr n-parameter logistic regressions.*
+
+If you are using *nplr* for the first time, you'll need to install the *nplr* package onto your computer, by typing the following into the console: install.packages("nplr")
+
+```{r}
+## load nplr package into session
+library(nplr)
+
+## since we need to fit a standard curve for each plate, let's separate our data into several dataframes, one for each plate
+plate1 <- filter(data_remove, Plate == 1)
+plate2 <- filter(data_remove, Plate == 2)
+plate3 <- filter(data_remove, Plate == 3)
+
+## below, the full curve-fitting will be demonstrated with plate 1. You will need to do the same for plates 2 and 3.
+
+## identify highest standard and blank on plate
+max_1 <- plate1 %>%
+    filter(STD == 1) %>%
+    select(OD_ELISA) %>%
+    min() # highest standard has the lowest OD
+    
+blank_1 <- plate1 %>%
+    filter(STD == 1) %>%
+    select(OD_ELISA) %>%
+    max() # blank has the highest OD
+    
+## 'invert' ODs so that the blank is zero and highest standard has highest OD
+## nplr() requires that y values are converted to proportions, do that too
+plate1_mod <- plate1 %>%
+    mutate(OD_ELISA_inverted = blank_1 - OD_ELISA) %>% # 'inverts' ODs
+    mutate(OD_ELISA_prop = OD_ELISA_inverted / (blank_1 - max_1)) # converts ODs to proportions
+
+## create a vector with the x values (in this case, x = expected concentration)
+exp_conc_1 <- plate1_mod %>%
+    filter(STD == 1) %>% # only keep rows with std curve data
+    filter(Concentration_ELISA != 0) %>% # remove data from blank
+    .[['Concentration_ELISA']] # subset column with expected concentration, as vector
+
+## create vector with y values (in this case, y = OD)
+od_1 <- plate1_mod %>%
+    filter(STD == 1) %>%
+    filter(Concentration_ELISA != 0) %>%
+    .[['OD_ELISA_prop']]
+
+## fit best std curve model using nplr() for plate 1
+model_1 <- nplr(exp_conc_1, od_1, useLog = TRUE)
+
+## visualize the model
+plot(model_1)
+
+## following the example shown above for plate 1, fit curves for plates 2 and 3 below
+# your code here
+
+```
+
+The goodness of fit (GOF) is the same as the R^2^ for the model. The fitted standard curve model for plate 1 has an R^2^ = 99.8%
+
+## 5. Estimate concentrations using the curves fit by nplr()
+
+```{r}
+## example for plate 1
+
+## use getEstimates() from nplr package to use model fitted above to estimate sample concentrations from their OD values
+plate1_conc <- getEstimates(model_1, plate1_mod$OD_ELISA_prop) %>%
+    rename(OD_prop_used = "y", estimated_conc = "x")
+
+## combine estimated concentrations from nplr standard curve to original data
+plate1_all <- bind_cols(plate1_mod, plate1_conc)
+
+## now do the same for plates 2 and 3
+# your code here
+```
+
+## 6. Calculate % recovery for standard curves fitted with nplr()
+
+$$
+\%\ recovery=\frac{recovered\ amount\ (estimated\ concentration)}{intial\ amount\ (expected\ concentration)} * 100 
+$$
+
+```{r}
+## calculate % recovery for all standards on plate
+## we want % recovery between 80-120% 
+
+## example using plate 1
+per_rec_1 <- plate1_all %>%
+    filter(STD == 1) %>%
+    mutate(perc_rec = Concentration_ELISA / estimated_conc * 100)
+
+## your turn to do the same for plates 2 and 3
+# your code here
+```
+
+## 7. Impute concentrations of samples that fall outside the range of quantification
+
+If a sample's estimated concentration is either greater than or less than that of the highest or lowest standard, respectively, it is not reliable since it falls outside the range of quantification. If a sample does fall outside the range of quantification, it's concentration can be imputed.
+
+For samples with concentration \< concentration of lowest standard:
+
+$$
+sample\ concentration = \frac{1}{2} * lowest\ standard\ concentration 
+$$
+
+For samples with concentration \> concentration of highest standard:
+
+$$
+sample\ concentration = highest\ standard\ concentration
+$$
+
+```{r}
+## identify highest standard conc and lowest standard conc
+hi_std_1 <- plate1_all %>%
+    filter(STD == 1) %>%
+    select(estimated_conc) %>%
+    max()
+
+lo_std_1 <- plate1_all %>%
+    filter(STD == 1) %>%
+    filter(Concentration_ELISA != 0) %>% # remove blank
+    select(estimated_conc) %>%
+    min()
+
+## use concentrations from standards to identify samples outside the range of quantification
+## if needed, impute sample concentrations
+plate1_imputed <- plate1_all %>%
+    filter(STD != 1) %>%
+    filter(Control != 1) %>%
+    ## we're using mutate() with case_when() to create a new variable based on conditionals
+    ## more info: https://www.statology.org/dplyr-case_when/
+    mutate(imputed_conc = case_when(estimated_conc < lo_std_1 ~ 1/2 * lo_std_1,
+                                    estimated_conc > hi_std_1 ~ hi_std_1,
+                                    .default = NA)) %>%
+    ## join imputed sample concentrations with rest of data
+    right_join(plate1_all)
+
+## do the same for plates 2 and 3
+# your code here
+```
+
+## Save data when all done
+
+For now, I'll demonstrate how to save plate 1 data on its own. Later, we can combine all plate data into one dataset and save that
+
+```{r}
+## remember we identified the path to the data folder earlier
+write_csv(plate1_imputed, file = paste0(data_path, "plate_1_cleaned.csv"))
+```
